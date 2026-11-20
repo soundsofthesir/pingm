@@ -2,7 +2,7 @@
 
 A live terminal table of ICMP reachability for many hosts at once.
 
-![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue)
+![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-blue)
 
 ```
 pingm  live multi-host ping
@@ -37,7 +37,7 @@ a all  u up  d down  q quit   ·   ▼ better  ▲ worse
 - **Relative ranges** — `pingm 10.0.0.0+16`
 - **CIDR subnets** — `pingm 10.0.0.0/24`
 - **No `ping` subprocess** — one ICMP socket for every host, so a /24 costs about as much as a single host
-- **No root needed** on macOS and most Linux (see [Privileges](#privileges))
+- **No root or Administrator needed** on macOS, Windows and most Linux (see [Privileges](#privileges))
 - **Single static binary** — nothing to install at runtime
 
 ## Install
@@ -52,6 +52,12 @@ Or build it yourself:
 
 ```bash
 go build -o pingm . && sudo install -m 0755 pingm /usr/local/bin/pingm
+```
+
+On Windows, build it with Go and put `pingm.exe` somewhere on your `PATH`:
+
+```powershell
+go build -o pingm.exe .
 ```
 
 Requires Go 1.26+ to build (the `golang.org/x/net` and `golang.org/x/term`
@@ -292,6 +298,11 @@ is still running.
 pingm uses an **unprivileged ICMP datagram socket**, so it does not need root:
 
 - **macOS** — works as-is.
+- **Windows** — works as-is, without Administrator. Windows has no
+  unprivileged ICMP socket, so pingm sends each probe through the system ICMP
+  API (`IcmpSendEcho` in `iphlpapi.dll`) instead. Each waiting probe holds a
+  thread, so at most 2048 can be outstanding at once. Only a long `-t` on a
+  large sweep reaches that, and probes past it count as lost.
 - **Linux** — works wherever `net.ipv4.ping_group_range` covers your user,
   which is the default on most current distributions. If yours does not:
 

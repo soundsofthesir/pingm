@@ -108,10 +108,6 @@ type Prober struct {
 	// mu guards inflight, which the sender, receiver and sweeper all touch.
 	// seq and counts are only ever written by the sender, but are kept under
 	// the same lock rather than reasoning about two regimes.
-	// TEMPORARY instrumentation.
-	nRead, nEchoReply, nOurs, nMatched, nStale, nSendErr, nCollide atomic.Int64
-	nBlocked, nBlockedNs                                           atomic.Int64
-
 	mu       sync.Mutex
 	seq      uint16
 	inflight map[uint16]probe
@@ -128,12 +124,18 @@ type probe struct {
 //
 // It prefers a datagram ICMP socket, which needs no privileges on macOS and on
 // Linux where net.ipv4.ping_group_range permits it, and falls back to a raw
-// socket (which does require root) only if that is unavailable.
+// socket (which does require root) only if that is unavailable. On Windows the
+// datagram socket is stood in for by the system ICMP API; see echoConn.
 func NewProber(targets []Target, interval, timeout time.Duration) (*Prober, error) {
 	conn, raw, err := listen(len(targets))
 	if err != nil {
 		return nil, err
 	}
+	return newProberOn(conn, raw, targets, interval, timeout), nil
+}
+
+// newProberOn builds a Prober around an already open connection.
+func newProberOn(conn net.PacketConn, raw bool, targets []Target, interval, timeout time.Duration) *Prober {
 	p := &Prober{
 		conn:     conn,
 		raw:      raw,
@@ -146,7 +148,11 @@ func NewProber(targets []Target, interval, timeout time.Duration) (*Prober, erro
 	}
 	p.interval.Store(int64(interval))
 	p.timeout.Store(int64(timeout))
-	return p, nil
+	if ec, ok := conn.(*echoConn); ok {
+		// Each blocking echo call waits exactly as long as the Prober would.
+		ec.timeout = p.Timeout
+	}
+	return p
 }
 
 // Interval is the current gap between probes for a given host.
