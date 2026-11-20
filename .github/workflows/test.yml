@@ -1,0 +1,24 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Allow unprivileged ICMP
+        if: runner.os == 'Linux'
+        run: sudo sysctl -w net.ipv4.ping_group_range="0 2147483647"
+      - run: go vet ./...
+      - run: go test -race ./...
