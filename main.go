@@ -22,6 +22,7 @@ import (
 	"github.com/maxajbarlow/pingm/internal/hostlist"
 	"github.com/maxajbarlow/pingm/internal/monitor"
 	"github.com/maxajbarlow/pingm/internal/ui"
+	"github.com/maxajbarlow/pingm/internal/update"
 )
 
 const (
@@ -37,13 +38,14 @@ const (
 )
 
 type options struct {
-	interval  time.Duration
-	timeout   time.Duration
-	count     int
-	filter    string
-	output    string
-	assumeYes bool
-	showVer   bool
+	interval      time.Duration
+	timeout       time.Duration
+	count         int
+	filter        string
+	output        string
+	assumeYes     bool
+	showVer       bool
+	noUpdateCheck bool
 }
 
 // validate checks the flag combination and resolves the effective probe
@@ -152,6 +154,10 @@ func startTable(ctx context.Context, m ui.Model) error {
 }
 
 func main() {
+	// A Windows update renames the running image aside; the previous process
+	// could not remove it, so the new one does.
+	update.CleanupOldExecutable()
+
 	if err := run(realSession(), os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
@@ -242,7 +248,11 @@ func table(s session, mon prober, opts options, filter ui.Filter) error {
 		<-finished
 	}()
 
-	return s.startUI(ctx, ui.NewModel(mon, filter, opts.interval, opts.count, finished))
+	model := ui.NewModel(mon, filter, opts.interval, opts.count, finished)
+	if !opts.noUpdateCheck {
+		model = model.WithUpdater(update.New(version), version)
+	}
+	return s.startUI(ctx, model)
 }
 
 // parseFlags reads the command line into options.
@@ -268,6 +278,7 @@ func parseFlags(argv []string, errOut io.Writer) (options, []string, error) {
 	fs.StringVar(&o.output, "o", "", "also append every probe outcome to this file as CSV")
 	fs.BoolVar(&o.assumeYes, "y", false, "skip the confirmation prompt for large host counts")
 	fs.BoolVar(&o.showVer, "v", false, "show version")
+	fs.BoolVar(&o.noUpdateCheck, "no-update-check", false, "do not look for a newer release at startup")
 
 	if err := fs.Parse(argv); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -321,6 +332,8 @@ Options:
                 capped at 2s)
   -o FILE       also write every probe outcome to FILE as CSV
   -y            skip the confirmation prompt for large host counts
+  -no-update-check
+                do not look for a newer release at startup
   -v            show version
   -h            show this help
 
@@ -330,6 +343,7 @@ Keys while running:
   + / -         probe slower or faster, stepping 100ms .. 10s
   p             pause the display; probing carries on underneath
   b             ring the bell when a host changes state
+  U             install a newer release when one is offered
   ?             show every key
   q             quit
 

@@ -39,6 +39,7 @@ a all  u up  d down  q quit   ·   ▼ better  ▲ worse
 - **No `ping` subprocess** — one ICMP socket for every host, so a /24 costs about as much as a single host
 - **No root or Administrator needed** on macOS, Windows and most Linux (see [Privileges](#privileges))
 - **Single static binary** — nothing to install at runtime
+- **Quiet update check** — a footer note when a newer release exists, and `U` installs it after asking
 
 ## Install
 
@@ -165,6 +166,7 @@ pingm google.com,10.0.0.1-10.0.0.4,192.168.1.0/30
 | `-t DURATION` | the interval, capped at 2s | How long to wait for a reply |
 | `-o FILE` | — | Also write every probe outcome to FILE as CSV |
 | `-y` | — | Skip the confirmation prompt for large host counts |
+| `-no-update-check` | — | Do not look for a newer release at startup |
 | `-v` | — | Show version |
 | `-h` | — | Show help |
 
@@ -185,6 +187,7 @@ Durations take a unit: `250ms`, `2s`, `1m`.
 | `-` | Probe faster (`_` works too) |
 | `p` | Pause the display; probing carries on underneath |
 | `b` | Ring the terminal bell when a host changes state |
+| `U` | Install a newer release when the footer offers one |
 | `?` | Show every key |
 | `q` | Quit (`Esc` and `Ctrl-C` also work) |
 
@@ -200,6 +203,28 @@ further in that direction.
 
 Unless `-t` pinned a timeout, the reply deadline follows the interval, so a
 host that stops answering is still reported promptly at any cadence.
+
+### Updating
+
+At startup pingm asks GitHub for the newest release, at most once a day; the
+answer is cached in the user cache directory. When there is a newer version,
+the footer says so without interrupting the table:
+
+```
+Interval: 1s  ·  ↑ v2.3.0 available · U to update
+```
+
+`U` opens a confirmation prompt. On `y`, pingm downloads the archive for this
+platform, checks it against the published `SHA256SUMS`, and replaces the
+running binary. If the install directory is not writable — `/usr/local/bin`
+usually is not — the table steps aside so `sudo` can ask for a password; on
+Windows the prompt is a UAC dialog. Restart pingm to run the new version.
+
+A failure leaves the reason in the footer and the table keeps running; `U`
+tries again. If the check itself fails, nothing is said at all. The check is
+the only request pingm makes on its own; it goes to `api.github.com` and
+`github.com`, and it carries nothing about you or the hosts you are watching.
+`-no-update-check` turns it off entirely.
 
 ## Reading the table
 

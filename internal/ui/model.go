@@ -1,9 +1,11 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"os"
+	"os/exec"
 	"sort"
 	"strings"
 	"time"
@@ -11,6 +13,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/maxajbarlow/pingm/internal/monitor"
+	"github.com/maxajbarlow/pingm/internal/update"
 )
 
 // Filter selects which hosts the table displays. It never changes what is
@@ -73,6 +76,34 @@ type tickMsg time.Time
 type frameMsg time.Time
 type finishedMsg struct{}
 
+// Messages belonging to the release check. The check runs alongside the
+// table, so a slow or absent network never delays the first frame.
+type updateAvailableMsg struct {
+	version string
+	err     error
+}
+
+type updatePreparedMsg struct {
+	artifact *update.Artifact
+	err      error
+}
+
+type updateAppliedMsg struct {
+	err error
+}
+
+// updateState is the quiet lifecycle of an offered update.
+type updateState int
+
+const (
+	updateIdle updateState = iota
+	updateConfirming
+	updateDownloading
+	updateInstalling
+	updateInstalled
+	updateFailed
+)
+
 // How long a newly-changed row stays highlighted, and how often the screen is
 // repainted while one is. The frame ticker runs only while something is
 // actually animating, so an idle table still costs nothing to display.
@@ -93,6 +124,14 @@ type Controller interface {
 	Snapshot() []monitor.HostView
 	SetInterval(time.Duration)
 	Privileged() bool
+}
+
+// Updater is the part of the updater the table drives. It is an interface so
+// the model can be tested without touching the network or the filesystem.
+type Updater interface {
+	Available(context.Context, string) (string, error)
+	Prepare(context.Context, string) (*update.Artifact, error)
+	Apply(*update.Artifact) (bool, *exec.Cmd, error)
 }
 
 // intervalLadder is what the +/- keys step through: a 1-2-5 sequence spanning
@@ -194,6 +233,16 @@ type Model struct {
 	showHelp bool
 	done     bool
 	quitting bool
+
+	// The release check. updater is nil in tests and when the check is
+	// disabled, which keeps every network path out of the table's way.
+	updater     Updater
+	current     string
+	updateVer   string
+	updateState updateState
+	updateErr   string
+	installed   string
+	pending     *update.Artifact
 }
 
 // NewModel builds the table model. finished is closed when probing has stopped
@@ -227,8 +276,60 @@ func NewModel(mon Controller, filter Filter, interval time.Duration, limit int, 
 // disturb the frame the renderer is drawing.
 func ringBell() { fmt.Fprint(os.Stderr, "\a") }
 
+// WithUpdater enables the background release check. current is the running
+// version, used in the confirmation prompt.
+func (m Model) WithUpdater(u Updater, current string) Model {
+	m.updater = u
+	m.current = current
+	return m
+}
+
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.tick(), m.waitForFinish())
+	return tea.Batch(m.tick(), m.waitForFinish(), m.checkForUpdate())
+}
+
+// checkForUpdate asks GitHub for the latest release without delaying the
+// first frame. Failures are dropped: an unreachable API is not worth a word in
+// a table of network health.
+func (m Model) checkForUpdate() tea.Cmd {
+	if m.updater == nil {
+		return nil
+	}
+	u, current := m.updater, m.current
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		latest, err := u.Available(ctx, current)
+		return updateAvailableMsg{version: latest, err: err}
+	}
+}
+
+// startUpdate begins the download in the background, so the table keeps
+// repainting while the release is fetched.
+func (m Model) startUpdate() (tea.Model, tea.Cmd) {
+	if m.updater == nil || m.updateVer == "" {
+		m.updateState = updateIdle
+		return m, nil
+	}
+	u, version := m.updater, m.updateVer
+	m.updateState = updateDownloading
+	m.updateErr = ""
+	return m, func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		a, err := u.Prepare(ctx, version)
+		return updatePreparedMsg{artifact: a, err: err}
+	}
+}
+
+// finishUpdate records a successful install. The process keeps running the
+// old image until it is restarted, so say so rather than implying the table
+// has changed underneath the user.
+func (m *Model) finishUpdate() {
+	m.installed = m.updateVer
+	m.updateVer = ""
+	m.updateState = updateInstalled
+	m.updateErr = ""
 }
 
 func (m Model) frame() tea.Cmd {
@@ -265,6 +366,57 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case finishedMsg:
 		m.done = true
 		m.refreshViews()
+		return m, nil
+
+	case updateAvailableMsg:
+		// Only the first answer is interesting. A check that lands while an
+		// update is being prepared must not replace what is being installed.
+		if msg.err == nil && msg.version != "" && m.updateState == updateIdle {
+			m.updateVer = msg.version
+		}
+		return m, nil
+
+	case updatePreparedMsg:
+		if msg.err != nil {
+			m.updateState = updateFailed
+			m.updateErr = msg.err.Error()
+			return m, nil
+		}
+		done, cmd, err := m.updater.Apply(msg.artifact)
+		switch {
+		case err != nil:
+			_ = msg.artifact.Close()
+			m.updateState = updateFailed
+			m.updateErr = err.Error()
+		case done:
+			_ = msg.artifact.Close()
+			m.finishUpdate()
+		case cmd == nil:
+			_ = msg.artifact.Close()
+			m.updateState = updateFailed
+			m.updateErr = "the installer produced no command"
+		default:
+			// The install directory needs elevation. Keep the artifact until
+			// the handed-over command has finished with it.
+			m.pending = msg.artifact
+			m.updateState = updateInstalling
+			return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+				return updateAppliedMsg{err: err}
+			})
+		}
+		return m, nil
+
+	case updateAppliedMsg:
+		if m.pending != nil {
+			_ = m.pending.Close()
+			m.pending = nil
+		}
+		if msg.err != nil {
+			m.updateState = updateFailed
+			m.updateErr = msg.err.Error()
+			return m, nil
+		}
+		m.finishUpdate()
 		return m, nil
 
 	case tickMsg:
@@ -321,6 +473,21 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// The update prompt is modal too: accepting is a deliberate y or Enter,
+	// and everything else stays out of the table's way until it is answered.
+	if m.updateState == updateConfirming {
+		switch key {
+		case "y", "enter":
+			return m.startUpdate()
+		case "n", "esc":
+			m.updateState = updateIdle
+		case "ctrl+c":
+			m.quitting = true
+			return m, tea.Quit
+		}
+		return m, nil
+	}
+
 	switch key {
 	case "q", "esc", "ctrl+c":
 		m.quitting = true
@@ -340,6 +507,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.paused = !m.paused
 	case "b":
 		m.belling = !m.belling
+	case "U":
+		// Uppercase so it cannot be confused with u, the up filter.
+		if m.updateVer != "" && (m.updateState == updateIdle || m.updateState == updateFailed) {
+			m.updateErr = ""
+			m.updateState = updateConfirming
+		}
 	case "+", "=":
 		// "=" is the unshifted key, so + works without reaching for shift.
 		m.setInterval(slower(m.interval))
@@ -528,6 +701,9 @@ func (m Model) View() string {
 	if m.showHelp {
 		return m.helpView()
 	}
+	if m.updateState == updateConfirming {
+		return m.updateView()
+	}
 
 	cols := NewColumns(m.views, m.width)
 	matched := m.matching()
@@ -682,6 +858,9 @@ func (m Model) medianLatency() (time.Duration, bool) {
 
 func (m Model) statusLine(matched int) string {
 	parts := []string{fmt.Sprintf("Interval: %s", m.interval)}
+	if note := m.updateNote(); note != "" {
+		parts = append(parts, note)
+	}
 
 	// The roll-up earns its place only with a table too big to count by eye.
 	if len(m.views) > 1 {
@@ -720,6 +899,26 @@ func (m Model) statusLine(matched int) string {
 		parts = append(parts, "Done")
 	}
 	return strings.Join(parts, "  ·  ")
+}
+
+// updateNote is the footer's quiet word about a newer release. Newlines are
+// flattened because the footer is one line, however long the error was.
+func (m Model) updateNote() string {
+	switch m.updateState {
+	case updateInstalled:
+		return "Updated to v" + m.installed + " — restart pingm"
+	case updateDownloading:
+		return "Downloading v" + m.updateVer + "…"
+	case updateInstalling:
+		return "Installing v" + m.updateVer + "…"
+	case updateFailed:
+		return "Update failed — U to retry: " + strings.ReplaceAll(m.updateErr, "\n", " ")
+	default:
+		if m.updateVer != "" {
+			return "↑ v" + m.updateVer + " available · U to update"
+		}
+	}
+	return ""
 }
 
 func (m Model) keyHints() string {
@@ -762,6 +961,7 @@ func (m Model) helpView() string {
 		{"+ / -", "probe slower or faster (= and _ work too)"},
 		{"p", "pause the display; probing carries on"},
 		{"b", "ring the bell when a host changes state"},
+		{"U", "install a newer release when one is offered"},
 		{"?", "show this help"},
 		{"q", "quit (Esc and Ctrl-C also work)"},
 	}
@@ -803,4 +1003,24 @@ func (m Model) helpView() string {
 		body = styleHelpBox.Render(body)
 	}
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, body)
+}
+
+// updateView asks before replacing the installed binary. It is modal, so a
+// stray key cannot start a download or a privilege prompt.
+func (m Model) updateView() string {
+	avail := m.width - helpBorderCost
+	if avail < 1 {
+		avail = 1
+	}
+
+	lines := []string{
+		styleHelpTitle.Render(truncate(fmt.Sprintf("Update pingm v%s → v%s?", m.current, m.updateVer), avail)),
+		"",
+		styleFooter.Render(truncate("Downloads the release, verifies its checksum, and replaces", avail)),
+		styleFooter.Render(truncate("the running binary. You may be asked for your password.", avail)),
+		"",
+		key("y", "update") + styleFooter.Render("    ") + key("n", "cancel"),
+	}
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center,
+		styleHelpBox.Render(strings.Join(lines, "\n")))
 }
