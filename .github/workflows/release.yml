@@ -30,6 +30,9 @@ jobs:
             exit 1
           fi
 
+      - name: Allow unprivileged ICMP
+        run: sudo sysctl -w net.ipv4.ping_group_range="0 2147483647"
+
       - run: go test ./...
 
       - name: Build archives
