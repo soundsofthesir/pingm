@@ -5,9 +5,18 @@ import "github.com/charmbracelet/lipgloss"
 // Glyphs used in the table. Lipgloss measures display width correctly for
 // these, so unlike the shell version there is no locale-dependent padding to
 // work around.
+//
+// glyphUp, glyphDown and sparkRamp are variables because UseBasicGlyphs
+// replaces them for consoles whose font cannot draw them.
+var (
+	glyphUp   = "✔"
+	glyphDown = "✘"
+
+	// sparkRamp is the sparkline's height scale, lowest first.
+	sparkRamp = []rune{'▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'}
+)
+
 const (
-	glyphUp         = "✔"
-	glyphDown       = "✘"
 	glyphUnresolved = "?"
 	glyphBetter     = "▼"
 	glyphWorse      = "▲"
@@ -18,9 +27,6 @@ const (
 	// rather than a tall bar, so loss never reads as high latency.
 	glyphLost = "·"
 )
-
-// sparkRamp is the sparkline's height scale, lowest first.
-var sparkRamp = [...]rune{'▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'}
 
 // A restrained palette: status carries the only saturated colour, so a table
 // of healthy hosts reads as calm and a failure is the thing your eye lands on.

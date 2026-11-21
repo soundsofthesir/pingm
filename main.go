@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -24,7 +25,7 @@ import (
 )
 
 const (
-	version = "2.1.1"
+	version = "2.2.0"
 
 	// maxHosts is far above the shell version's 256 because probing no longer
 	// costs a process per host — the whole list shares one socket.
@@ -136,6 +137,9 @@ func realSession() session {
 // terminal's own click-to-select, which most terminals hand back if you hold
 // Shift (Option on macOS Terminal and iTerm).
 func startTable(ctx context.Context, m ui.Model) error {
+	if ui.NeedsBasicGlyphs(runtime.GOOS, os.Getenv) {
+		ui.UseBasicGlyphs()
+	}
 	program := tea.NewProgram(m,
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
