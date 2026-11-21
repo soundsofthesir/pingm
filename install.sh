@@ -16,6 +16,10 @@ echo "Building pingm ..."
 cd "$SCRIPT_DIR"
 go build -trimpath -ldflags "-s -w" -o pingm .
 
+if [[ ! -d "$INSTALL_DIR" ]]; then
+    mkdir -p "$INSTALL_DIR" 2>/dev/null || sudo mkdir -p "$INSTALL_DIR"
+fi
+
 echo "Installing to ${INSTALL_DIR}/pingm ..."
 if [[ -w "$INSTALL_DIR" ]]; then
     install -m 0755 pingm "${INSTALL_DIR}/pingm"
@@ -24,7 +28,7 @@ else
     sudo install -m 0755 pingm "${INSTALL_DIR}/pingm"
 fi
 
-echo "✔ Installed: $(${INSTALL_DIR}/pingm -v)"
+echo "✔ Installed: $("${INSTALL_DIR}/pingm" -v)"
 echo "  Run 'pingm -h' to get started."
 
 # pingm uses an unprivileged ICMP datagram socket, which needs no special

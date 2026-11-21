@@ -53,7 +53,14 @@ jobs:
               tar -czf "dist/${name}.tar.gz" -C "build-${name}" pingm
             fi
           done
-          (cd dist && sha256sum * > SHA256SUMS)
+          (cd dist && sha256sum -- * > SHA256SUMS)
+          for archive in \
+            pingm-windows-amd64.zip pingm-windows-arm64.zip \
+            pingm-darwin-amd64.tar.gz pingm-darwin-arm64.tar.gz \
+            pingm-linux-amd64.tar.gz pingm-linux-arm64.tar.gz; do
+            test -s "dist/${archive}" || { echo "missing dist/${archive}" >&2; exit 1; }
+          done
+          test "$(wc -l < dist/SHA256SUMS)" -eq 6 || { echo "SHA256SUMS is incomplete" >&2; exit 1; }
           ls -l dist
 
       - uses: actions/upload-artifact@v4

@@ -22,3 +22,38 @@ jobs:
         run: sudo sysctl -w net.ipv4.ping_group_range="0 2147483647"
       - run: go vet ./...
       - run: go test -race ./...
+
+  install:
+    # Exercise the real installers on each platform, so "installs as a
+    # system-wide command" is checked rather than assumed.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install system-wide (macOS and Linux)
+        if: runner.os != 'Windows'
+        env:
+          INSTALL_DIR: ${{ runner.temp }}/bin
+        run: |
+          ./install.sh
+          test -x "$INSTALL_DIR/pingm"
+          "$INSTALL_DIR/pingm" -v
+      - name: Install system-wide (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File ./install.ps1 -FromSource
+          if ($LASTEXITCODE -ne 0) { throw "installer failed with exit code $LASTEXITCODE" }
+          $exe = Join-Path $env:ProgramFiles 'pingm\pingm.exe'
+          if (-not (Test-Path $exe)) { throw "missing $exe" }
+          & $exe -v
+          $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+          if (@($machinePath -split ';') -notcontains (Join-Path $env:ProgramFiles 'pingm')) {
+            throw 'pingm is not on the system PATH'
+          }

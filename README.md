@@ -42,8 +42,8 @@ a all  u up  d down  q quit   ·   ▼ better  ▲ worse
 
 ## Install
 
-Download the archive for your system from the
-[latest release](https://github.com/maxajbarlow/pingm/releases/latest):
+Every release ships the same binary for macOS, Linux and Windows, on both
+`amd64` and `arm64`:
 
 | System | Archive |
 |---|---|
@@ -51,14 +51,35 @@ Download the archive for your system from the
 | macOS | `pingm-darwin-arm64.tar.gz` (`amd64` for Intel Macs) |
 | Linux | `pingm-linux-amd64.tar.gz` or `pingm-linux-arm64.tar.gz` |
 
-On Windows, extract `pingm.exe` into a folder on your `PATH`. The binary is
-not code-signed, so the first run may show "Windows protected your PC": choose
-More info, then Run anyway. `Unblock-File .\pingm.exe` in PowerShell clears it
-in advance.
+### Windows
 
-On macOS and Linux:
+In an Administrator PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/soundsofthesir/pingm/main/install.ps1 | iex
+```
+
+The installer downloads the release, checks its SHA-256 against `SHA256SUMS`,
+installs `pingm.exe` to `%ProgramFiles%\pingm`, and adds that folder to the
+system `PATH`. Open a new terminal afterwards.
+
+To install a specific version, or to build from a checkout instead, download
+`install.ps1` and run it:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Version 2.2.0
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -FromSource
+```
+
+The binary is not code-signed, so a copy downloaded by hand may show "Windows
+protected your PC" on first run: choose More info, then Run anyway.
+`Unblock-File .\pingm.exe` clears it in advance. The installer does that for
+you.
+
+### macOS and Linux
 
 ```bash
+curl -fsSLO https://github.com/soundsofthesir/pingm/releases/latest/download/pingm-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz
 tar -xzf pingm-*.tar.gz && sudo install -m 0755 pingm /usr/local/bin/pingm
 ```
 
@@ -68,12 +89,16 @@ On macOS, a binary downloaded with a browser is quarantined until you run
 ### From source
 
 ```bash
-git clone https://github.com/maxajbarlow/pingm
+git clone https://github.com/soundsofthesir/pingm
 cd pingm
-./install.sh
+./install.sh        # macOS and Linux
 ```
 
-Or build it yourself, as `pingm.exe` on Windows:
+On Windows, use `.\install.ps1 -FromSource` from an Administrator PowerShell.
+Both scripts build with `-trimpath -ldflags "-s -w"` and install the result to
+a system-wide location (`/usr/local/bin` or `%ProgramFiles%\pingm`).
+
+Or build it yourself:
 
 ```bash
 go build -o pingm . && sudo install -m 0755 pingm /usr/local/bin/pingm
@@ -91,8 +116,10 @@ Bump `version` in `main.go`, commit, then push a matching tag:
 git tag v2.2.0 && git push origin v2.2.0
 ```
 
-`.github/workflows/release.yml` builds every platform and publishes the
-release. It refuses a tag that does not match `main.go`.
+`.github/workflows/release.yml` builds all six archives (Windows, macOS and
+Linux, each on `amd64` and `arm64`), fails if any is missing from
+`SHA256SUMS`, and publishes the release. It refuses a tag that does not match
+`main.go`.
 
 ## Usage
 
