@@ -22,14 +22,13 @@ a all  u up  d down  q quit   ·   ▼ better  ▲ worse
 ## Features
 
 - **Everything at once** — `pingm 10.0.0.0/24` watches a whole subnet in one table
-- **Honest status** — **✔ UP** / **✘ DOWN** always reflect the *latest* probe, not the host's history
-- **State-change highlight** — a host lights up green when it comes alive and red when it drops out
-- **Sparklines** — the last 16 probes per host, with losses drawn as gaps rather than bars
+- **State-change highlight** — clear state highlights
+- **Sparklines** — the last 16 probes per host, losses drawn as gaps
 - **Jitter** — the spread of the replies, the same figure `ping` reports as mdev
-- **Outage timer** — a down host shows how long it has been gone, in place of a latency it cannot supply
-- **DNS failures are their own state** — a name that will not resolve says **? DNS**, not **✘ DOWN**
-- **Scrollable** — mouse wheel or keys, so a /24 is not limited to what fits on screen
-- **Responsive columns** — the table fits itself to the terminal rather than wrapping
+- **Outage timer** — a down host shows how long it has been gone
+- **DNS failures are their own state**
+- **Scrollable** — /24 is not limited to what fits on screen
+- **Responsive columns** — the table fits itself to the terminal
 - **CSV log** — `-o soak.csv` records every probe for later analysis
 - **Filter by state** — `-f down` shows only what is broken, or press `d` while it runs
 - **Comma-separated hosts** — `pingm 8.8.8.8,1.1.1.1,router.lan`
