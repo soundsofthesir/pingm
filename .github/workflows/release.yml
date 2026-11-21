@@ -1,0 +1,65 @@
+name: release
+
+# Pushing a tag such as v2.2.0 builds every platform and publishes a GitHub
+# Release with the archives attached. Running it by hand from the Actions tab
+# builds the same archives without publishing, as a dry run.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Check the tag matches the version in main.go
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          want="v$(grep -m1 -oE '^[[:space:]]+version = "[^"]+"' main.go | cut -d'"' -f2)"
+          if [ "$GITHUB_REF_NAME" != "$want" ]; then
+            echo "Tag is $GITHUB_REF_NAME but main.go says $want" >&2
+            exit 1
+          fi
+
+      - run: go test ./...
+
+      - name: Build archives
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          mkdir dist
+          for target in windows/amd64 windows/arm64 darwin/amd64 darwin/arm64 linux/amd64 linux/arm64; do
+            os="${target%/*}"
+            arch="${target#*/}"
+            name="pingm-${os}-${arch}"
+            mkdir "build-${name}"
+            if [ "$os" = windows ]; then
+              GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "-s -w" -o "build-${name}/pingm.exe" .
+              (cd "build-${name}" && zip -q "../dist/${name}.zip" pingm.exe)
+            else
+              GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "-s -w" -o "build-${name}/pingm" .
+              tar -czf "dist/${name}.tar.gz" -C "build-${name}" pingm
+            fi
+          done
+          (cd dist && sha256sum * > SHA256SUMS)
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pingm-archives
+          path: dist/*
+
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes

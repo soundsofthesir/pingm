@@ -42,27 +42,57 @@ a all  u up  d down  q quit   ·   ▼ better  ▲ worse
 
 ## Install
 
+Download the archive for your system from the
+[latest release](https://github.com/maxajbarlow/pingm/releases/latest):
+
+| System | Archive |
+|---|---|
+| Windows | `pingm-windows-amd64.zip` (`arm64` for Snapdragon and other Arm PCs) |
+| macOS | `pingm-darwin-arm64.tar.gz` (`amd64` for Intel Macs) |
+| Linux | `pingm-linux-amd64.tar.gz` or `pingm-linux-arm64.tar.gz` |
+
+On Windows, extract `pingm.exe` into a folder on your `PATH`. The binary is
+not code-signed, so the first run may show "Windows protected your PC": choose
+More info, then Run anyway. `Unblock-File .\pingm.exe` in PowerShell clears it
+in advance.
+
+On macOS and Linux:
+
+```bash
+tar -xzf pingm-*.tar.gz && sudo install -m 0755 pingm /usr/local/bin/pingm
+```
+
+On macOS, a binary downloaded with a browser is quarantined until you run
+`xattr -d com.apple.quarantine pingm`. Downloading with `curl` avoids that.
+
+### From source
+
 ```bash
 git clone https://github.com/maxajbarlow/pingm
 cd pingm
 ./install.sh
 ```
 
-Or build it yourself:
+Or build it yourself, as `pingm.exe` on Windows:
 
 ```bash
 go build -o pingm . && sudo install -m 0755 pingm /usr/local/bin/pingm
 ```
 
-On Windows, build it with Go and put `pingm.exe` somewhere on your `PATH`:
-
-```powershell
-go build -o pingm.exe .
-```
-
 Requires Go 1.26+ to build (the `golang.org/x/net` and `golang.org/x/term`
 versions in use set that floor). The resulting binary has no runtime
 dependencies.
+
+### Releasing
+
+Bump `version` in `main.go`, commit, then push a matching tag:
+
+```bash
+git tag v2.2.0 && git push origin v2.2.0
+```
+
+`.github/workflows/release.yml` builds every platform and publishes the
+release. It refuses a tag that does not match `main.go`.
 
 ## Usage
 
@@ -313,6 +343,14 @@ pingm uses an **unprivileged ICMP datagram socket**, so it does not need root:
 If a datagram socket is unavailable, pingm falls back to a raw socket, which
 does require root or `CAP_NET_RAW`. When that happens the footer says
 `raw socket`, so an elevated run is never silent about it.
+
+## Symbols in the Windows console
+
+In the older Windows console, the default on Windows 10, the fonts have no
+check marks, most sparkline bar heights or rounded corners, so pingm shows
+`+ UP` and `x DOWN` and a three-step sparkline there. Windows Terminal, VS Code,
+ConEmu and Git Bash get the full set. `PINGM_GLYPHS=full` or
+`PINGM_GLYPHS=basic` overrides the detection.
 
 ## Large sweeps
 
