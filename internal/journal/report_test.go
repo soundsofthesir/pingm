@@ -138,3 +138,18 @@ func TestListedCapsLongLists(t *testing.T) {
 		t.Fatalf("listed = %q", got)
 	}
 }
+
+func TestReportStripsTerminalEscapes(t *testing.T) {
+	events := []Event{
+		state(1, "gw", "", "up"),
+		state(5, "gw", "up", "down"),
+		{T: at(6), Kind: KindCmd, Cmd: "echo \x1b]0;pwned\x07hi"},
+		{T: at(7), Kind: KindNet, Changes: []string{"Wi-Fi a to \x1b[2Jb"}},
+		state(9, "gw", "down", "up"),
+	}
+	var b strings.Builder
+	_ = Report(events, "x", &b, time.UTC)
+	if strings.ContainsAny(b.String(), "\x1b\x07") {
+		t.Fatalf("escape reached the output: %q", b.String())
+	}
+}

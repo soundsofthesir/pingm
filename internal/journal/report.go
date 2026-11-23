@@ -190,9 +190,9 @@ func Report(events []Event, path string, w io.Writer, loc *time.Location) error 
 	fmt.Fprintf(&b, "Session %s to %s (%s)\n",
 		s.Start.In(loc).Format("2006-01-02 15:04:05"), clock(s.End), span(s.End.Sub(s.Start)))
 	if len(s.Args) > 0 {
-		fmt.Fprintf(&b, "pingm %s\n", strings.Join(s.Args, " "))
+		fmt.Fprintf(&b, "pingm %s\n", clean(strings.Join(s.Args, " ")))
 	}
-	fmt.Fprintf(&b, "Log: %s\n", path)
+	fmt.Fprintf(&b, "Log: %s\n", clean(path))
 
 	if len(s.Incidents) == 0 {
 		b.WriteString("\nNo outages.\n")
@@ -228,6 +228,17 @@ func Report(events []Event, path string, w io.Writer, loc *time.Location) error 
 	return err
 }
 
+// clean drops control characters, so text from shell history, Wi-Fi names or
+// a hand-edited log cannot send escape sequences to the terminal.
+func clean(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || (r >= 0x7f && r <= 0x9f) {
+			return -1
+		}
+		return r
+	}, s)
+}
+
 func label(kind string) string {
 	switch kind {
 	case KindNet:
@@ -244,19 +255,19 @@ func label(kind string) string {
 func describe(e Event) string {
 	switch e.Kind {
 	case KindNet:
-		return strings.Join(e.Changes, "; ")
+		return clean(strings.Join(e.Changes, "; "))
 	case KindCmd:
-		return e.Cmd
+		return clean(e.Cmd)
 	default:
-		return e.Text
+		return clean(e.Text)
 	}
 }
 
 func listed(names []string) string {
 	if len(names) <= maxListed {
-		return strings.Join(names, ", ")
+		return clean(strings.Join(names, ", "))
 	}
-	return fmt.Sprintf("%s and %d more", strings.Join(names[:maxListed], ", "), len(names)-maxListed)
+	return clean(fmt.Sprintf("%s and %d more", strings.Join(names[:maxListed], ", "), len(names)-maxListed))
 }
 
 // span formats a duration to the second, like "2m 32s".
