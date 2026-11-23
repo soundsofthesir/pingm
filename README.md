@@ -31,6 +31,7 @@ a all  u up  d down  q quit   ·   ▼ better  ▲ worse
 - **Scrollable** — mouse wheel or keys, so a /24 is not limited to what fits on screen
 - **Responsive columns** — the table fits itself to the terminal rather than wrapping
 - **CSV log** — `-o soak.csv` records every probe for later analysis
+- **Session log** — opt-in record of outages, network changes and shell commands, and `-report` shows what happened during each outage
 - **Filter by state** — `-f down` shows only what is broken, or press `d` while it runs
 - **Comma-separated hosts** — `pingm 8.8.8.8,1.1.1.1,router.lan`
 - **IP ranges** — `pingm 10.0.0.1-10.0.0.20`
@@ -167,6 +168,7 @@ pingm google.com,10.0.0.1-10.0.0.4,192.168.1.0/30
 | `-o FILE` | — | Also write every probe outcome to FILE as CSV |
 | `-y` | — | Skip the confirmation prompt for large host counts |
 | `-no-update-check` | — | Do not look for a newer release at startup |
+| `-report [FILE]` | — | Print the outages in the newest [session log](#session-log), or FILE |
 | `-v` | — | Show version |
 | `-h` | — | Show help |
 
@@ -188,6 +190,7 @@ Durations take a unit: `250ms`, `2s`, `1m`.
 | `p` | Pause the display; probing carries on underneath |
 | `b` | Ring the terminal bell when a host changes state |
 | `U` | Install a newer release when the footer offers one |
+| `n` | Write a note in the [session log](#session-log), when it is on |
 | `?` | Show every key |
 | `q` | Quit (`Esc` and `Ctrl-C` also work) |
 
@@ -374,6 +377,82 @@ impossibly fast reply.
 
 The file is flushed about once a second, so `tail -f` works while a long soak
 is still running.
+
+## Session log
+
+A session log records what went wrong during a run and what you did about it,
+so the fix can be found afterwards. It is off unless you turn it on:
+
+```bash
+export PINGM_SESSION_LOG=1
+```
+
+Each run then writes one JSON Lines file:
+
+| System | Folder |
+|---|---|
+| macOS | `~/Library/Logs/pingm` |
+| Linux | `$XDG_STATE_HOME/pingm`, or `~/.local/state/pingm` |
+| Windows | `%LOCALAPPDATA%\pingm\logs` |
+
+`PINGM_LOG_DIR` picks another folder. Files older than 30 days are deleted
+when a new session starts. Files are readable by your user only.
+
+The log has these events (`ev`):
+
+| Event | Written when |
+|---|---|
+| `start` | The run begins. Has the version, arguments, hosts, DNS failures and the network setup |
+| `state` | A host goes up or down |
+| `stats` | Once a minute per host: probes sent, lost, and min/avg/max latency |
+| `net` | The network changes: an interface comes up, goes down or changes address, or the gateway, DNS servers or Wi-Fi network change |
+| `cmd` | A command is run in another terminal |
+| `note` | You press `n`, type a note and press Enter |
+| `action` | You change the filter, the rate, pause, or quit |
+| `end` | The run ends. Has each host's totals |
+
+pingm checks the network and shell history every 2 seconds. The macOS Wi-Fi
+name is only available to apps with Location access, so on macOS a Wi-Fi
+change usually shows as an interface or address change instead.
+
+### Commands from other terminals
+
+pingm reads new lines from `~/.zsh_history`, `~/.bash_history`, fish's
+history, PowerShell's PSReadLine history and `$HISTFILE`. `PINGM_HISTORY`
+adds more files or globs, separated like `PATH`. Lines already in a file when
+the run starts are ignored.
+
+zsh and bash save history when the shell exits, so commands only appear once
+that terminal closes. For zsh, save each command as it runs, with its time:
+
+```zsh
+setopt INC_APPEND_HISTORY EXTENDED_HISTORY
+```
+
+Common secrets are masked before they are written: `password=`, `token=`,
+`--password x`, `Authorization:` headers, passwords in URLs, and OpenAI,
+Anthropic, GitHub, Slack and AWS key shapes. The masking cannot catch
+everything, so read a log before sharing it.
+
+### Reading a session
+
+```console
+$ pingm -report
+Session 2026-11-22 16:50:00 to 17:02:04 (12m 4s)
+pingm -i 1s 10.0.0.1,1.1.1.1
+Log: /Users/you/Library/Logs/pingm/2026-11-22T165000-4121.jsonl
+
+Incident 1: 16:50:10 to 16:52:42 (2m 32s), fixed
+  Down: 10.0.0.1, 1.1.1.1
+  16:50:20  network  en0 down (was 10.0.0.5/24); gateway 10.0.0.1 via en0 to none
+  16:50:25  command  sudo ifconfig en0 up
+  16:50:28  note     replugged cable
+```
+
+An incident runs from the first host dropping to the last one coming back.
+Hosts whose outages overlap are grouped, since they usually share a cause. A
+host that never answered during the run is listed at the end rather than as an
+incident. `pingm -report FILE` reads an older session.
 
 ## Privileges
 

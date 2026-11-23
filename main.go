@@ -20,7 +20,10 @@ import (
 
 	"github.com/maxajbarlow/pingm/internal/export"
 	"github.com/maxajbarlow/pingm/internal/hostlist"
+	"github.com/maxajbarlow/pingm/internal/journal"
 	"github.com/maxajbarlow/pingm/internal/monitor"
+	"github.com/maxajbarlow/pingm/internal/netstate"
+	"github.com/maxajbarlow/pingm/internal/shellhist"
 	"github.com/maxajbarlow/pingm/internal/ui"
 	"github.com/maxajbarlow/pingm/internal/update"
 )
@@ -46,6 +49,7 @@ type options struct {
 	assumeYes     bool
 	showVer       bool
 	noUpdateCheck bool
+	report        bool
 }
 
 // validate checks the flag combination and resolves the effective probe
@@ -101,12 +105,24 @@ type session struct {
 
 	newMonitor func(hosts []string, interval, timeout time.Duration) (prober, error)
 	startUI    func(ctx context.Context, m ui.Model) error
+
+	// openLog starts the session log. Nil means the session log is off.
+	openLog func() (*sessionLog, error)
+	// logDir is where -report looks for the newest session log.
+	logDir string
+}
+
+// sessionLog is an open session log and what it watches outside the table.
+type sessionLog struct {
+	j       *journal.Journal
+	sources journal.Sources
+	network netstate.Snapshot // The network as the session starts.
 }
 
 // realSession wires run to the actual process: real streams, real terminals,
 // a real ICMP socket and a real Bubble Tea program.
 func realSession() session {
-	return session{
+	s := session{
 		out:    os.Stdout,
 		errOut: os.Stderr,
 		in:     os.Stdin,
@@ -130,7 +146,33 @@ func realSession() session {
 		},
 
 		startUI: startTable,
+		logDir:  logDir(),
 	}
+	if journal.Enabled(os.Getenv) {
+		s.openLog = openSessionLog
+	}
+	return s
+}
+
+func logDir() string {
+	home, _ := os.UserHomeDir()
+	return journal.Dir(os.Getenv, runtime.GOOS, home)
+}
+
+// openSessionLog opens a new session log and starts following the shell
+// history files, so only commands from here on are logged.
+func openSessionLog() (*sessionLog, error) {
+	j, err := journal.Open(logDir(), nil)
+	if err != nil {
+		return nil, err
+	}
+	home, _ := os.UserHomeDir()
+	hist := shellhist.NewWatcher(shellhist.DefaultPatterns(os.Getenv, home), nil)
+	return &sessionLog{
+		j:       j,
+		sources: journal.Sources{Network: netstate.Collect, Commands: hist.Poll},
+		network: netstate.Collect(context.Background()),
+	}, nil
 }
 
 // startTable runs the interactive table until the user quits.
@@ -178,6 +220,9 @@ func run(s session, argv []string) error {
 		fmt.Fprintf(s.out, "pingm v%s\n", version)
 		return nil
 	}
+	if opts.report {
+		return report(s, args)
+	}
 	if len(args) < 1 {
 		return errors.New("no hosts specified. Run 'pingm -h' for help")
 	}
@@ -209,12 +254,13 @@ func run(s session, argv []string) error {
 
 	// The log is opened before the alt screen takes over, so a bad path is
 	// reported as a plain error rather than flashing past behind the table.
+	var recorders []monitor.Recorder
 	if opts.output != "" {
 		log, err := export.Create(opts.output)
 		if err != nil {
 			return err
 		}
-		mon.SetRecorder(log)
+		recorders = append(recorders, log)
 		// Unlike the socket, a failed close here means probe outcomes were
 		// lost, so it is always worth surfacing — the table has been torn
 		// down by this point, so the message is the only sign of it.
@@ -225,7 +271,93 @@ func run(s session, argv []string) error {
 		}()
 	}
 
-	return table(s, mon, opts, filter)
+	// A session log that cannot be opened is worth a warning, not worth
+	// refusing to show the table.
+	var slog *sessionLog
+	if s.openLog != nil {
+		slog, err = s.openLog()
+		if err != nil {
+			fmt.Fprintln(s.errOut, "Warning: session log is off:", err)
+			slog = nil
+		}
+	}
+	if slog != nil {
+		slog.j.Start(startEvent(argv, mon.Snapshot(), opts.interval, slog.network))
+		recorders = append(recorders, slog.j)
+		defer func() {
+			if cerr := slog.j.Close(); cerr != nil {
+				fmt.Fprintln(s.errOut, "Error:", cerr)
+			}
+		}()
+	}
+	switch len(recorders) {
+	case 0:
+	case 1:
+		mon.SetRecorder(recorders[0])
+	default:
+		mon.SetRecorder(teeRecorder(recorders))
+	}
+
+	return table(s, mon, opts, filter, slog)
+}
+
+// teeRecorder hands every probe outcome to each recorder in turn.
+type teeRecorder []monitor.Recorder
+
+func (t teeRecorder) Record(r monitor.Result, at time.Time, host string) error {
+	var first error
+	for _, rec := range t {
+		if err := rec.Record(r, at, host); err != nil && first == nil {
+			first = err
+		}
+	}
+	return first
+}
+
+func startEvent(argv []string, views []monitor.HostView, interval time.Duration, network netstate.Snapshot) journal.Event {
+	hosts := make([]journal.HostInfo, len(views))
+	for i, v := range views {
+		hosts[i] = journal.HostInfo{Name: v.Display}
+		if v.ResolveErr != nil {
+			hosts[i].Error = v.ResolveErr.Error()
+		}
+	}
+	return journal.Event{
+		Version:  version,
+		Args:     argv,
+		Hosts:    hosts,
+		Interval: interval.String(),
+		Net:      &network,
+	}
+}
+
+// report prints what happened in a session log: the newest one, or the file
+// named on the command line.
+func report(s session, args []string) error {
+	var path string
+	switch len(args) {
+	case 0:
+		latest, err := journal.Latest(s.logDir)
+		if err != nil {
+			return fmt.Errorf("%w (set %s=1 to keep session logs)", err, journal.EnvEnable)
+		}
+		path = latest
+	case 1:
+		path = args[0]
+	default:
+		return errors.New("-report takes at most one log file")
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	events, err := journal.Read(f)
+	if err != nil {
+		return err
+	}
+	return journal.Report(events, path, s.out, time.Local)
 }
 
 // table probes and draws until the user quits, the round limit is reached, or
@@ -235,7 +367,7 @@ func run(s session, argv []string) error {
 // an error from the UI still stops probing and drains every outstanding result
 // first. Returning early instead would leave the probe loop running while the
 // caller closes the log it is writing to.
-func table(s session, mon prober, opts options, filter ui.Filter) error {
+func table(s session, mon prober, opts options, filter ui.Filter, slog *sessionLog) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 
 	finished := make(chan struct{})
@@ -243,12 +375,25 @@ func table(s session, mon prober, opts options, filter ui.Filter) error {
 		mon.Run(ctx, opts.count)
 		close(finished)
 	}()
+	watched := make(chan struct{})
+	if slog != nil {
+		go func() {
+			slog.j.Watch(ctx, slog.sources, slog.network)
+			close(watched)
+		}()
+	} else {
+		close(watched)
+	}
 	defer func() {
 		stop()
 		<-finished
+		<-watched
 	}()
 
 	model := ui.NewModel(mon, filter, opts.interval, opts.count, finished)
+	if slog != nil {
+		model = model.WithJournal(slog.j)
+	}
 	if !opts.noUpdateCheck {
 		model = model.WithUpdater(update.New(version), version)
 	}
@@ -279,6 +424,7 @@ func parseFlags(argv []string, errOut io.Writer) (options, []string, error) {
 	fs.BoolVar(&o.assumeYes, "y", false, "skip the confirmation prompt for large host counts")
 	fs.BoolVar(&o.showVer, "v", false, "show version")
 	fs.BoolVar(&o.noUpdateCheck, "no-update-check", false, "do not look for a newer release at startup")
+	fs.BoolVar(&o.report, "report", false, "print the outages in the newest session log and what happened during them")
 
 	if err := fs.Parse(argv); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -314,6 +460,7 @@ func usage(w io.Writer) {
 	fmt.Fprintf(w, `pingm v%s — a live table of ICMP reachability for many hosts
 
 Usage: pingm [options] <hosts>
+       pingm -report [FILE]
 
 Hosts is a comma-separated list of any mix of:
   8.8.8.8                 an address
@@ -334,6 +481,8 @@ Options:
   -y            skip the confirmation prompt for large host counts
   -no-update-check
                 do not look for a newer release at startup
+  -report       print the outages in the newest session log, or FILE,
+                and what happened during each one
   -v            show version
   -h            show this help
 
@@ -344,6 +493,7 @@ Keys while running:
   p             pause the display; probing carries on underneath
   b             ring the bell when a host changes state
   U             install a newer release when one is offered
+  n             write a note in the session log
   ?             show every key
   q             quit
 
@@ -355,5 +505,8 @@ Examples:
   pingm -o soak.csv -i 5s 10.0.0.0/24
 
 Pinging %d or more hosts at once asks for confirmation first; -y skips it.
-`, version, confirmThreshold)
+
+Set %s=1 to keep a session log of outages, network changes and
+shell commands, in %s.
+`, version, confirmThreshold, journal.EnvEnable, logDir())
 }

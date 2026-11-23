@@ -243,6 +243,18 @@ type Model struct {
 	updateErr   string
 	installed   string
 	pending     *update.Artifact
+
+	// journal, when set, receives notes and the key presses that change
+	// probing. noting is true while a note is being typed.
+	journal  Journal
+	noting   bool
+	noteText []rune
+}
+
+// Journal is the part of the session log the table writes to.
+type Journal interface {
+	Note(text string)
+	Action(text string)
 }
 
 // NewModel builds the table model. finished is closed when probing has stopped
@@ -282,6 +294,20 @@ func (m Model) WithUpdater(u Updater, current string) Model {
 	m.updater = u
 	m.current = current
 	return m
+}
+
+// WithJournal sends notes and key presses to the session log and enables the
+// n key.
+func (m Model) WithJournal(j Journal) Model {
+	m.journal = j
+	return m
+}
+
+// act logs a key press, if there is a session log.
+func (m Model) act(text string) {
+	if m.journal != nil {
+		m.journal.Action(text)
+	}
 }
 
 func (m Model) Init() tea.Cmd {
@@ -488,23 +514,41 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	if m.noting {
+		return m.handleNoteKey(msg)
+	}
+
 	switch key {
 	case "q", "esc", "ctrl+c":
+		m.act("quit")
 		m.quitting = true
 		return m, tea.Quit
 	case "?":
 		m.showHelp = true
+	case "n":
+		if m.journal != nil {
+			m.noting = true
+			m.noteText = nil
+		}
 	case "a":
 		m.filter = FilterAll
 		m.clampOffset()
+		m.act("show all")
 	case "u":
 		m.filter = FilterUp
 		m.clampOffset()
+		m.act("show up")
 	case "d":
 		m.filter = FilterDown
 		m.clampOffset()
+		m.act("show down")
 	case "p":
 		m.paused = !m.paused
+		if m.paused {
+			m.act("pause")
+		} else {
+			m.act("resume")
+		}
 	case "b":
 		m.belling = !m.belling
 	case "U":
@@ -530,6 +574,31 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.offset = 0
 	case "end", "G":
 		m.offset = m.maxOffset()
+	}
+	return m, nil
+}
+
+// handleNoteKey edits the note being typed. Enter saves it, Esc drops it.
+func (m Model) handleNoteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyCtrlC:
+		m.quitting = true
+		return m, tea.Quit
+	case tea.KeyEsc:
+		m.noting = false
+	case tea.KeyEnter:
+		if text := strings.TrimSpace(string(m.noteText)); text != "" {
+			m.journal.Note(text)
+		}
+		m.noting = false
+	case tea.KeyBackspace:
+		if n := len(m.noteText); n > 0 {
+			m.noteText = m.noteText[:n-1]
+		}
+	case tea.KeySpace:
+		m.noteText = append(m.noteText, ' ')
+	case tea.KeyRunes:
+		m.noteText = append(m.noteText, msg.Runes...)
 	}
 	return m, nil
 }
@@ -682,6 +751,7 @@ func (m *Model) setInterval(d time.Duration) {
 	m.interval = d
 	m.refresh = refreshFor(d)
 	m.mon.SetInterval(d)
+	m.act("interval " + d.String())
 }
 
 func (m Model) matching() []int {
@@ -752,7 +822,11 @@ func (m Model) View() string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(styleFooter.Render(truncate(m.statusLine(len(matched)), m.width)))
+	status := m.statusLine(len(matched))
+	if m.noting {
+		status = "Note: " + string(m.noteText) + "_"
+	}
+	b.WriteString(styleFooter.Render(truncate(status, m.width)))
 	b.WriteString("\n")
 	b.WriteString(m.keyHints())
 	return b.String()
@@ -928,9 +1002,14 @@ func (m Model) keyHints() string {
 		key("d", "down"),
 		key("+/-", "rate"),
 		key("p", "pause"),
+	}
+	if m.journal != nil {
+		hints = append(hints, key("n", "note"))
+	}
+	hints = append(hints,
 		key("?", "help"),
 		key("q", "quit"),
-	}
+	)
 	legend := styleBetter.Render(glyphBetter) + styleFooter.Render(" better  ") +
 		styleWorse.Render(glyphWorse) + styleFooter.Render(" worse")
 	return strings.Join(hints, styleFooter.Render("  ")) + styleFooter.Render("   ·   ") + legend
@@ -962,9 +1041,14 @@ func (m Model) helpView() string {
 		{"p", "pause the display; probing carries on"},
 		{"b", "ring the bell when a host changes state"},
 		{"U", "install a newer release when one is offered"},
-		{"?", "show this help"},
-		{"q", "quit (Esc and Ctrl-C also work)"},
 	}
+	if m.journal != nil {
+		rows = append(rows, [2]string{"n", "write a note in the session log"})
+	}
+	rows = append(rows,
+		[2]string{"?", "show this help"},
+		[2]string{"q", "quit (Esc and Ctrl-C also work)"},
+	)
 
 	const gap = 3
 	keyWidth, textWidth := 0, 0

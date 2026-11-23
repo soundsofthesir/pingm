@@ -31,6 +31,8 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+
+	"github.com/maxajbarlow/pingm/internal/journal"
 )
 
 const (
@@ -102,8 +104,17 @@ type terminal struct {
 // start launches the binary attached to a pty of a known size.
 func start(t *testing.T, args ...string) *terminal {
 	t.Helper()
+	return startWithEnv(t, nil, args...)
+}
+
+// startWithEnv is start with extra environment variables. The session log is
+// switched off unless env turns it on, so running the tests from a shell that
+// has it on does not fill the real log folder with test sessions.
+func startWithEnv(t *testing.T, env []string, args ...string) *terminal {
+	t.Helper()
 
 	cmd := exec.Command(binary(t), args...)
+	cmd.Env = append(append(os.Environ(), "PINGM_SESSION_LOG="), env...)
 	f, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: ptyCols, Rows: ptyRows})
 	if err != nil {
 		t.Skipf("cannot allocate a pty here: %v", err)
@@ -414,6 +425,64 @@ func TestLogSurvivesQuittingOnARealTerminal(t *testing.T) {
 	}
 	if !strings.HasPrefix(string(data), "timestamp,host,probe,status,rtt_ms") {
 		t.Errorf("the log is missing its header:\n%s", data)
+	}
+}
+
+// The session log is written by the real shutdown path too, and picks up a
+// note typed in the table and a command appended to a watched history file.
+func TestSessionLogOnARealTerminal(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and runs the binary")
+	}
+	dir := t.TempDir()
+	logs := filepath.Join(dir, "logs")
+	hist := filepath.Join(dir, "zsh_history")
+	if err := os.WriteFile(hist, []byte("old command\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	term := startWithEnv(t, []string{
+		"PINGM_SESSION_LOG=1", "PINGM_LOG_DIR=" + logs, "PINGM_HISTORY=" + hist, "HISTFILE=",
+	}, "-no-update-check", "-i", "200ms", "127.0.0.1")
+
+	term.waitFor("HOST")
+	term.skipWithoutICMP()
+	term.waitFor("n note")
+
+	f, err := os.OpenFile(hist, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString("sudo ifconfig en0 down\n")
+	_ = f.Close()
+
+	term.send("n")
+	term.waitFor("Note: _")
+	term.send("replugged cable\r")
+	term.waitFor("n note")
+	term.send("q")
+	if err := term.waitForExit(); err != nil {
+		t.Fatalf("quitting was not clean: %v\n%s", err, term.text())
+	}
+
+	path, err := journal.Latest(logs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(data)
+	for _, want := range []string{
+		`"ev":"start"`, `"ev":"state"`, `"text":"replugged cable"`,
+		`"cmd":"sudo ifconfig en0 down"`, `"ev":"end"`,
+	} {
+		if !strings.Contains(log, want) {
+			t.Errorf("session log is missing %s:\n%s", want, log)
+		}
+	}
+	if strings.Contains(log, "old command") {
+		t.Errorf("history from before the session was logged:\n%s", log)
 	}
 }
 
