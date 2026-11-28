@@ -564,6 +564,9 @@ func (m *Model) scroll(delta int) {
 // rowBudget is how many host rows fit between the header and the footer.
 func (m Model) rowBudget() int {
 	budget := m.height - headerLines - footerLines
+	if m.edit.mode == editAdd {
+		budget-- // The add prompt's keys take a line of their own.
+	}
 	if budget < 1 {
 		return 1
 	}
