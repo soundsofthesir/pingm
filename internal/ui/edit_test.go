@@ -176,3 +176,26 @@ func TestHistoryFollowsTheHostAcrossARemoval(t *testing.T) {
 		t.Errorf("b's average trend = %v after a moved out, want better (50 to 40ms)", got)
 	}
 }
+
+// The prompt's keys go on their own line, and the table gives up a row for
+// it so the screen does not overflow.
+func TestAddPromptKeysSitBelowThePrompt(t *testing.T) {
+	rows := make([]monitor.HostView, 40)
+	for i := range rows {
+		rows[i] = up("h", ms(1), ms(1), 0)
+	}
+	m := newTestModel(rows)
+	m, _ = typeKeys(m, "n", "10.0.0.1")
+
+	lines := strings.Split(m.View(), "\n")
+	if len(lines) > m.height {
+		t.Errorf("view is %d lines in a %d-line terminal", len(lines), m.height)
+	}
+	prompt, keys := lines[len(lines)-2], lines[len(lines)-1]
+	if !strings.Contains(prompt, "Add 10.0.0.1") || strings.Contains(prompt, "esc") {
+		t.Errorf("prompt line = %q", prompt)
+	}
+	if !strings.Contains(keys, "enter") || !strings.Contains(keys, "esc") {
+		t.Errorf("keys line = %q", keys)
+	}
+}

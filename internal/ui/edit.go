@@ -6,7 +6,6 @@ import (
 	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/maxajbarlow/pingm/internal/hostlist"
 )
 
@@ -265,8 +264,9 @@ func (m Model) bottomLine() string {
 	sep := styleFooter.Render("  ")
 	switch m.edit.mode {
 	case editAdd:
-		hints := sep + key("enter", "add") + sep + key("esc", "cancel")
-		room := m.width - lipgloss.Width(hints) - len("Add ") - 1
+		// The keys sit on a line of their own below the prompt, so the
+		// prompt has the full width for typing.
+		room := m.width - len("Add ") - 1
 		input := string(m.edit.input)
 		if room > 0 && len([]rune(input)) > room {
 			// Keep the end in view, where the typing is.
@@ -274,7 +274,8 @@ func (m Model) bottomLine() string {
 			input = string(r[len(r)-room:])
 		}
 		return styleKeyName.Render("Add ") + styleInput.Render(input) +
-			styleSelected.Render("▏") + hints
+			styleSelected.Render("▏") + "\n" +
+			key("enter", "add") + sep + key("esc", "cancel")
 	case editRemove:
 		return key("↑↓", "select") + sep + key("enter", "remove") + sep + key("esc", "done")
 	default:
