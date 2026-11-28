@@ -320,11 +320,13 @@ func TestReadPayloadRejectsForeignTraffic(t *testing.T) {
 // reported loss instead of touching the network.
 func pacingProber(targets int, interval time.Duration) *Prober {
 	p := &Prober{
-		targets:  make([]Target, targets),
-		counts:   make([]int, targets),
+		counts:   make(map[int]int),
 		results:  make(chan Result, targets*4),
 		inflight: make(map[uint16]probe),
 		reset:    make(chan struct{}, 1),
+	}
+	for i := 0; i < targets; i++ {
+		p.Add(Target{ID: i})
 	}
 	p.interval.Store(int64(interval))
 	return p
@@ -456,5 +458,43 @@ func TestReceiveBufferStaysWithinSaneBounds(t *testing.T) {
 	}
 	if got := receiveBuffer(1 << 20); got > 8<<20 {
 		t.Errorf("buffer for a huge host list = %d, want it capped", got)
+	}
+}
+
+// A removed target must not be probed again, even by a round that took its
+// target list before the removal.
+func TestRemovedTargetIsNotSentTo(t *testing.T) {
+	p := pacingProber(2, time.Second)
+	targets := p.snapshotTargets()
+	p.Remove(targets[0].ID)
+
+	for _, tg := range targets {
+		p.send(tg)
+	}
+	close(p.results)
+	for r := range p.results {
+		if r.Index == targets[0].ID {
+			t.Errorf("removed target %d was probed: %+v", r.Index, r)
+		}
+	}
+}
+
+func TestRemoveForgetsOutstandingProbes(t *testing.T) {
+	p := pacingProber(2, time.Second)
+	p.inflight[1] = probe{target: 0, number: 1, sentAt: time.Now()}
+	p.inflight[2] = probe{target: 1, number: 1, sentAt: time.Now()}
+
+	p.Remove(0)
+	if _, ok := p.inflight[1]; ok || len(p.inflight) != 1 {
+		t.Errorf("inflight = %v, want only target 1's probe left", p.inflight)
+	}
+}
+
+func TestAddedTargetsGetFreshIDs(t *testing.T) {
+	p := pacingProber(2, time.Second)
+	p.Remove(1)
+	added := p.Add(Target{Display: "x"}, Target{Display: "y"})
+	if added[0].ID != 2 || added[1].ID != 3 {
+		t.Errorf("IDs = %d,%d, want 2,3 (never reused)", added[0].ID, added[1].ID)
 	}
 }

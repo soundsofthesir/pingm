@@ -40,7 +40,7 @@ func (s State) Reachable() bool { return s == StateUp }
 
 // Result is the outcome of a single probe.
 type Result struct {
-	Index int           // Which target this belongs to.
+	Index int           // The ID of the target this belongs to.
 	Probe int           // Per-target probe number, increasing.
 	RTT   time.Duration // Round-trip time; meaningless unless OK.
 	OK    bool          // Whether a reply arrived before the timeout.

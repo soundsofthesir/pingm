@@ -42,6 +42,7 @@ func NeedsBasicGlyphs(goos string, getenv func(string) string) bool {
 func UseBasicGlyphs() {
 	glyphUp = "+"
 	glyphDown = "x"
+	glyphSelected = ">"
 	sparkRamp = []rune{'_', '▄', '█'}
 	styleHelpBox = styleHelpBox.Border(lipgloss.NormalBorder())
 }

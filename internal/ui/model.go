@@ -117,13 +117,16 @@ const (
 )
 
 // Controller is the part of the monitor the table needs: a consistent
-// snapshot to draw, the ability to retune the probe cadence, and whether the
-// socket needed privileges. An interface rather than *monitor.Monitor so the
-// model can be exercised without opening a socket.
+// snapshot to draw, the ability to retune the probe cadence and change the
+// host list, and whether the socket needed privileges. An interface rather
+// than *monitor.Monitor so the model can be exercised without opening a
+// socket.
 type Controller interface {
 	Snapshot() []monitor.HostView
 	SetInterval(time.Duration)
 	Privileged() bool
+	Add(hosts []string) int
+	Remove(id int)
 }
 
 // Updater is the part of the updater the table drives. It is an interface so
@@ -203,23 +206,11 @@ type Model struct {
 	// the view stays put as hosts change state underneath it.
 	offset int
 
-	// Previous readings per host, for trend arrows. Indexed by host, so a row
-	// moving around under a filter keeps its own history.
-	prevLoss []float64
-	prevAvg  []float64
-	hasPrev  []bool
-
-	// flashAt records when each host most recently changed state and which
-	// way it went, which drives the highlight. Indexed by host, so the marker
-	// follows the host even as a filter moves its row around.
-	flashAt   []time.Time
-	flashDown []bool
+	// memo is what the table remembers about each host between snapshots,
+	// keyed by host ID so it follows the host as a filter, an addition or a
+	// removal moves its row around.
+	memo      map[int]hostMemo
 	animating bool
-
-	// downSince is when each host stopped answering, and outlives the flash:
-	// it is what the table reads out in place of a latency the host cannot
-	// supply. Zero means the host is up, or has never been seen down.
-	downSince []time.Time
 
 	// now is injected so the animation can be tested without sleeping.
 	now func() time.Time
@@ -228,6 +219,10 @@ type Model struct {
 	// asked for it. Injected so tests need not make noise.
 	bell    func()
 	belling bool
+
+	// edit is the add or remove interaction in progress, if any.
+	edit      editState
+	hostLimit int
 
 	paused   bool
 	showHelp bool
@@ -258,17 +253,31 @@ func NewModel(mon Controller, filter Filter, interval time.Duration, limit int, 
 		limit:     limit,
 		refresh:   refreshFor(interval),
 		views:     views,
-		prevLoss:  make([]float64, len(views)),
-		prevAvg:   make([]float64, len(views)),
-		hasPrev:   make([]bool, len(views)),
-		flashAt:   make([]time.Time, len(views)),
-		flashDown: make([]bool, len(views)),
-		downSince: make([]time.Time, len(views)),
+		memo:      make(map[int]hostMemo, len(views)),
+		hostLimit: DefaultHostLimit,
 		now:       time.Now,
 		bell:      ringBell,
 		width:     defaultWidth,
 		height:    24,
 	}
+}
+
+// hostMemo is the per-host state the table derives across snapshots.
+type hostMemo struct {
+	// Previous readings, for trend arrows.
+	prevLoss float64
+	prevAvg  float64
+	hasPrev  bool
+
+	// When the host most recently changed state and which way it went,
+	// which drives the highlight.
+	flashAt   time.Time
+	flashDown bool
+
+	// downSince is when the host stopped answering, and outlives the flash:
+	// it is what the table reads out in place of a latency the host cannot
+	// supply. Zero means the host is up, or has never been seen down.
+	downSince time.Time
 }
 
 // ringBell writes BEL to the terminal. It goes to stderr rather than through
@@ -367,6 +376,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.done = true
 		m.refreshViews()
 		return m, nil
+
+	case hostsAddedMsg:
+		return m.hostsAdded(msg), nil
 
 	case updateAvailableMsg:
 		// Only the first answer is interesting. A check that lands while an
@@ -473,6 +485,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	if m.edit.mode != editNone {
+		return m.handleEditKey(msg)
+	}
+	m.edit.notice = ""
+
 	// The update prompt is modal too: accepting is a deliberate y or Enter,
 	// and everything else stays out of the table's way until it is answered.
 	if m.updateState == updateConfirming {
@@ -507,6 +524,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.paused = !m.paused
 	case "b":
 		m.belling = !m.belling
+	case "n":
+		return m.startAdding()
+	case "x":
+		m.startRemoving()
 	case "U":
 		// Uppercase so it cannot be confused with u, the up filter.
 		if m.updateVer != "" && (m.updateState == updateIdle || m.updateState == updateFailed) {
@@ -582,14 +603,25 @@ func (m *Model) refreshViews() {
 	next := m.mon.Snapshot()
 	rang := false
 
-	for i := range m.views {
-		if i < len(next) {
-			rang = m.noteTransition(i, m.views[i].State, next[i].State) || rang
-		}
-		m.prevLoss[i] = m.views[i].Loss
-		m.prevAvg[i] = float64(m.views[i].Avg)
-		m.hasPrev[i] = m.views[i].State != monitor.StateWaiting
+	before := make(map[int]monitor.HostView, len(m.views))
+	for _, v := range m.views {
+		before[v.ID] = v
 	}
+	memo := make(map[int]hostMemo, len(next))
+	for _, v := range next {
+		hm := m.memo[v.ID]
+		if prev, seen := before[v.ID]; seen {
+			var changed bool
+			hm, changed = m.noteTransition(hm, prev.State, v.State)
+			rang = changed || rang
+			hm.prevLoss = prev.Loss
+			hm.prevAvg = float64(prev.Avg)
+			hm.hasPrev = prev.State != monitor.StateWaiting
+		}
+		memo[v.ID] = hm
+	}
+	// Hosts that have been removed are dropped along with the map.
+	m.memo = memo
 	m.views = next
 
 	if rang && m.belling && m.bell != nil {
@@ -598,8 +630,8 @@ func (m *Model) refreshViews() {
 	m.clampOffset()
 }
 
-// noteTransition records a change of state for host i and reports whether it
-// is worth ringing the bell for.
+// noteTransition records a change of state in a host's memo and reports
+// whether it is worth ringing the bell for.
 //
 // A host coming alive always flashes, first reply included, because that is
 // news either way. A host dropping out flashes only if it was up beforehand:
@@ -607,36 +639,40 @@ func (m *Model) refreshViews() {
 // all of them red at once would say nothing and drown out the one that
 // matters. The bell is stricter still and stays silent on first readings, so
 // starting the tool never sets off a fanfare.
-func (m *Model) noteTransition(i int, prev, next monitor.State) bool {
+func (m *Model) noteTransition(hm hostMemo, prev, next monitor.State) (hostMemo, bool) {
 	switch {
 	case prev != monitor.StateUp && next == monitor.StateUp:
-		m.flashAt[i] = m.now()
-		m.flashDown[i] = false
-		m.downSince[i] = time.Time{}
-		return prev != monitor.StateWaiting
+		hm.flashAt = m.now()
+		hm.flashDown = false
+		hm.downSince = time.Time{}
+		return hm, prev != monitor.StateWaiting
 
 	case prev == monitor.StateUp && next != monitor.StateUp:
-		m.flashAt[i] = m.now()
-		m.flashDown[i] = true
-		m.downSince[i] = m.now()
-		return true
+		hm.flashAt = m.now()
+		hm.flashDown = true
+		hm.downSince = m.now()
+		return hm, true
 
 	case prev == monitor.StateWaiting && next != monitor.StateWaiting:
 		// Down from the very first probe: worth timing, not worth announcing.
-		m.downSince[i] = m.now()
-		return false
+		hm.downSince = m.now()
+		return hm, false
 	}
-	return false
+	return hm, false
 }
 
 // flash is how strongly host i is highlighted right now, counting down from
 // FlashMax at the moment it changed state to zero once flashDuration has
 // elapsed.
 func (m Model) flash(i int) Flash {
-	if i >= len(m.flashAt) || m.flashAt[i].IsZero() {
+	if i >= len(m.views) {
 		return Flash{}
 	}
-	elapsed := m.now().Sub(m.flashAt[i])
+	hm := m.memo[m.views[i].ID]
+	if hm.flashAt.IsZero() {
+		return Flash{}
+	}
+	elapsed := m.now().Sub(hm.flashAt)
 	if elapsed < 0 || elapsed >= flashDuration {
 		return Flash{}
 	}
@@ -645,11 +681,11 @@ func (m Model) flash(i int) Flash {
 	if level > FlashMax {
 		level = FlashMax
 	}
-	return Flash{Level: level, Down: m.flashDown[i]}
+	return Flash{Level: level, Down: hm.flashDown}
 }
 
 func (m Model) anyFlashing() bool {
-	for i := range m.flashAt {
+	for i := range m.views {
 		if m.flash(i).Active() {
 			return true
 		}
@@ -660,13 +696,14 @@ func (m Model) anyFlashing() bool {
 // downFor is how long host i has been unreachable, or false if it is up or has
 // never been seen to fall over.
 func (m Model) downFor(i int) (time.Duration, bool) {
-	if i >= len(m.downSince) || m.downSince[i].IsZero() {
+	if i >= len(m.views) {
 		return 0, false
 	}
-	if m.views[i].State == monitor.StateUp {
+	since := m.memo[m.views[i].ID].downSince
+	if since.IsZero() || m.views[i].State == monitor.StateUp {
 		return 0, false
 	}
-	d := m.now().Sub(m.downSince[i])
+	d := m.now().Sub(since)
 	if d < 0 {
 		return 0, false
 	}
@@ -754,7 +791,7 @@ func (m Model) View() string {
 	b.WriteString("\n")
 	b.WriteString(styleFooter.Render(truncate(m.statusLine(len(matched)), m.width)))
 	b.WriteString("\n")
-	b.WriteString(m.keyHints())
+	b.WriteString(m.bottomLine())
 	return b.String()
 }
 
@@ -766,6 +803,7 @@ func (m Model) renderRow(i int, cols Columns) string {
 		Flash:      m.flash(i),
 		DownFor:    down,
 		HasDownFor: hasDown,
+		Selected:   m.isSelected(i),
 	})
 }
 
@@ -784,11 +822,13 @@ func scrollNotice(above, below int) string {
 }
 
 func (m Model) lossTrend(i int) Trend {
-	return TrendOf(m.views[i].Loss, m.prevLoss[i], m.hasPrev[i])
+	hm := m.memo[m.views[i].ID]
+	return TrendOf(m.views[i].Loss, hm.prevLoss, hm.hasPrev)
 }
 
 func (m Model) avgTrend(i int) Trend {
-	return TrendOf(float64(m.views[i].Avg), m.prevAvg[i], m.hasPrev[i])
+	hm := m.memo[m.views[i].ID]
+	return TrendOf(float64(m.views[i].Avg), hm.prevAvg, hm.hasPrev)
 }
 
 // emptyNotice explains an empty table in the terms of the active filter, and
@@ -806,6 +846,9 @@ func (m Model) emptyNotice() string {
 		}
 		return fmt.Sprintf("All %d hosts are responding.", len(m.views))
 	default:
+		if len(m.views) == 0 {
+			return "No hosts. n to add"
+		}
 		return "No hosts to show."
 	}
 }
@@ -858,6 +901,9 @@ func (m Model) medianLatency() (time.Duration, bool) {
 
 func (m Model) statusLine(matched int) string {
 	parts := []string{fmt.Sprintf("Interval: %s", m.interval)}
+	if m.edit.notice != "" {
+		parts = append([]string{m.edit.notice}, parts...)
+	}
 	if note := m.updateNote(); note != "" {
 		parts = append(parts, note)
 	}
@@ -927,6 +973,8 @@ func (m Model) keyHints() string {
 		key("u", "up"),
 		key("d", "down"),
 		key("+/-", "rate"),
+		key("n", "add"),
+		key("x", "remove"),
 		key("p", "pause"),
 		key("?", "help"),
 		key("q", "quit"),
@@ -959,6 +1007,8 @@ func (m Model) helpView() string {
 		{"PgUp/PgDn", "scroll a page at a time"},
 		{"g / G", "jump to the top or the bottom"},
 		{"+ / -", "probe slower or faster (= and _ work too)"},
+		{"n", "add hosts, written as on the command line"},
+		{"x", "pick a host with ↑ ↓ and remove it with Enter"},
 		{"p", "pause the display; probing carries on"},
 		{"b", "ring the bell when a host changes state"},
 		{"U", "install a newer release when one is offered"},

@@ -300,13 +300,19 @@ type RowState struct {
 	Flash      Flash
 	DownFor    time.Duration
 	HasDownFor bool
+	Selected   bool // The row picked for removal.
 }
 
 // Row renders one host. Numeric columns are right-aligned so magnitudes line
 // up and an outlier is visible without reading every digit.
 func Row(v monitor.HostView, c Columns, s RowState) string {
 	var b strings.Builder
-	b.WriteString(s.Flash.marker() + left(s.Flash.hostStyle(), truncate(v.Display, c.Host), c.Host))
+	if s.Selected {
+		b.WriteString(styleSelected.Render(glyphSelected) + pad(wFlash-1) +
+			left(styleSelected, truncate(v.Display, c.Host), c.Host))
+	} else {
+		b.WriteString(s.Flash.marker() + left(s.Flash.hostStyle(), truncate(v.Display, c.Host), c.Host))
+	}
 	b.WriteString(pad(gutter) + statusCell(v))
 	b.WriteString(pad(gutter) + latencyCell(v, s))
 	b.WriteString(pad(gutter) + rightTrend(lossStyle(v), FormatLoss(v.Loss, v.State != monitor.StateWaiting), s.LossTrend, wLoss))

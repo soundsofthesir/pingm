@@ -147,13 +147,15 @@ func (p *fakeProber) Snapshot() []monitor.HostView {
 	defer p.mu.Unlock()
 	views := make([]monitor.HostView, len(p.hosts))
 	for i, h := range p.hosts {
-		views[i] = monitor.HostView{Display: h, State: monitor.StateWaiting}
+		views[i] = monitor.HostView{ID: i, Display: h, State: monitor.StateWaiting}
 	}
 	return views
 }
 
 func (p *fakeProber) SetInterval(time.Duration) {}
 func (p *fakeProber) Privileged() bool          { return false }
+func (p *fakeProber) Add([]string) int          { return 0 }
+func (p *fakeProber) Remove(int)                {}
 
 func (p *fakeProber) SetRecorder(r monitor.Recorder) {
 	p.mu.Lock()
