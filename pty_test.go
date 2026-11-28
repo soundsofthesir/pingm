@@ -444,3 +444,48 @@ func TestPipedOutputIsRefusedByTheRealBinary(t *testing.T) {
 		t.Errorf("output %q does not explain the problem", out)
 	}
 }
+
+// Hosts typed at the n prompt join the running table, and x then Enter takes
+// one out again, with probing carrying on throughout.
+func TestAddAndRemoveHostsOnARealTerminal(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and runs the binary")
+	}
+	term := start(t, "-i", "200ms", "127.0.0.1")
+
+	term.waitFor("HOST")
+	term.skipWithoutICMP()
+
+	term.send("n")
+	time.Sleep(100 * time.Millisecond)
+	term.send("127.0.0.2-127.0.0.3")
+	term.waitFor("Add 127.0.0.2-127.0.0.3")
+	term.reset()
+	term.send("\r")
+	// Only 127.0.0.1 answers on every system (macOS does not answer the rest
+	// of 127/8), so count rows rather than hosts that are up.
+	term.waitFor("127.0.0.3")
+	term.waitFor(" down")
+
+	term.reset()
+	term.send("x")
+	time.Sleep(100 * time.Millisecond)
+	term.send("\x1b[B") // Down to 127.0.0.2.
+	time.Sleep(100 * time.Millisecond)
+	term.send("\r")
+	term.waitFor("esc done")
+	term.send("\x1b")
+	term.waitFor("x remove")
+
+	// Opening and closing help repaints the whole table, so what is drawn
+	// next is the full host list rather than only the lines that changed.
+	term.send("?")
+	term.waitFor("press any key")
+	term.reset()
+	term.send(" ")
+	term.waitFor("127.0.0.3")
+	if strings.Contains(term.text(), "127.0.0.2") {
+		t.Errorf("127.0.0.2 is still drawn after removing it:\n%s", term.text())
+	}
+	term.send("q")
+}

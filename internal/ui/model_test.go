@@ -20,17 +20,33 @@ type fakeSource struct {
 	at         int
 	intervals  []time.Duration // Every SetInterval the model asked for.
 	privileged bool
+	added      [][]string // Every Add the model asked for.
+	removed    []int      // Every Remove the model asked for.
 }
+
+func (f *fakeSource) Add(hosts []string) int {
+	f.added = append(f.added, hosts)
+	return len(hosts)
+}
+
+func (f *fakeSource) Remove(id int) { f.removed = append(f.removed, id) }
 
 func (f *fakeSource) SetInterval(d time.Duration) { f.intervals = append(f.intervals, d) }
 
 func (f *fakeSource) Privileged() bool { return f.privileged }
 
-// Snapshot returns the next scripted frame, holding on the last one.
+// Snapshot returns the next scripted frame, holding on the last one. A host
+// without an ID is given its position, which is what a monitor that has never
+// had hosts added or removed would report.
 func (f *fakeSource) Snapshot() []monitor.HostView {
-	frame := f.frames[f.at]
+	frame := append([]monitor.HostView(nil), f.frames[f.at]...)
 	if f.at < len(f.frames)-1 {
 		f.at++
+	}
+	for i := range frame {
+		if frame[i].ID == 0 {
+			frame[i].ID = i
+		}
 	}
 	return frame
 }

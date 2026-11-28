@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -360,5 +361,76 @@ func TestFailingRecorderDoesNotStopProbing(t *testing.T) {
 
 	if got := m.stats[0].Sent; got != 2 {
 		t.Errorf("Sent = %d after a failing recorder, want 2", got)
+	}
+}
+
+// --- Adding and removing hosts while running ------------------------------
+
+func hostNames(views []HostView) []string {
+	names := make([]string, len(views))
+	for i, v := range views {
+		names[i] = v.Display
+	}
+	return names
+}
+
+func TestAddAppendsNewHostsAndSkipsOnesAlreadyThere(t *testing.T) {
+	m := newTestMonitor(t, []string{"a", "b"}, fixedResolver("127.0.0.1"))
+	defer m.Close()
+
+	if got := m.Add([]string{"b", "c", "c", "d"}); got != 2 {
+		t.Errorf("Add returned %d, want 2 (b is already there, c is repeated)", got)
+	}
+	if got := strings.Join(hostNames(m.Snapshot()), ","); got != "a,b,c,d" {
+		t.Errorf("table is %q, want a,b,c,d", got)
+	}
+}
+
+func TestRemoveDropsOnlyThatHost(t *testing.T) {
+	m := newTestMonitor(t, []string{"a", "b", "c"}, fixedResolver("127.0.0.1"))
+	defer m.Close()
+
+	views := m.Snapshot()
+	m.stats[2].Record(Result{Probe: 1, OK: true, RTT: time.Millisecond})
+	m.Remove(views[1].ID)
+
+	after := m.Snapshot()
+	if got := strings.Join(hostNames(after), ","); got != "a,c" {
+		t.Fatalf("table is %q, want a,c", got)
+	}
+	if after[1].ID != views[2].ID || after[1].State != StateUp {
+		t.Errorf("c lost its identity or statistics when b was removed: %+v", after[1])
+	}
+	m.Remove(views[1].ID) // Removing twice is harmless.
+}
+
+// Hosts added mid-run are probed from the next round, and a removed host's
+// queued results are not credited to whichever host now sits in its row.
+func TestAddAndRemoveWhileRunning(t *testing.T) {
+	m := newTestMonitor(t, []string{"a", "b"}, fixedResolver("127.0.0.1"))
+	defer m.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { m.Run(ctx, 0); close(done) }()
+
+	m.Remove(m.Snapshot()[0].ID)
+	m.Add([]string{"c"})
+
+	deadline := time.Now().Add(3 * time.Second)
+	for !m.Done() && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	views := m.Snapshot()
+	if got := strings.Join(hostNames(views), ","); got != "b,c" {
+		t.Fatalf("table is %q, want b,c", got)
+	}
+	for _, v := range views {
+		if v.State == StateWaiting {
+			t.Errorf("%s was never probed", v.Display)
+		}
 	}
 }

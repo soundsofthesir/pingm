@@ -248,7 +248,7 @@ func table(s session, mon prober, opts options, filter ui.Filter) error {
 		<-finished
 	}()
 
-	model := ui.NewModel(mon, filter, opts.interval, opts.count, finished)
+	model := ui.NewModel(mon, filter, opts.interval, opts.count, finished).WithHostLimit(maxHosts)
 	if !opts.noUpdateCheck {
 		model = model.WithUpdater(update.New(version), version)
 	}
@@ -343,6 +343,8 @@ Keys while running:
   + / -         probe slower or faster, stepping 100ms .. 10s
   p             pause the display; probing carries on underneath
   b             ring the bell when a host changes state
+  n             add hosts, written as on the command line
+  x             pick a host with the arrows, Enter removes it
   U             install a newer release when one is offered
   ?             show every key
   q             quit

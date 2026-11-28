@@ -31,6 +31,7 @@ a all  u up  d down  q quit   ·   ▼ better  ▲ worse
 - **Responsive columns** — the table fits itself to the terminal
 - **CSV log** — `-o soak.csv` records every probe for later analysis
 - **Filter by state** — `-f down` shows only what is broken, or press `d` while it runs
+- **Add and remove hosts live** — `n` adds hosts, `x` removes one, without restarting
 - **Comma-separated hosts** — `pingm 8.8.8.8,1.1.1.1,router.lan`
 - **IP ranges** — `pingm 10.0.0.1-10.0.0.20`
 - **Relative ranges** — `pingm 10.0.0.0+16`
@@ -186,6 +187,8 @@ Durations take a unit: `250ms`, `2s`, `1m`.
 | `-` | Probe faster (`_` works too) |
 | `p` | Pause the display; probing carries on underneath |
 | `b` | Ring the terminal bell when a host changes state |
+| `n` | Add hosts while it runs, written the same way as on the command line (`10.0.0.0/28`, `a.com,b.com`). Enter adds, Esc cancels |
+| `x` | Pick a host with `↑` `↓` and press Enter to remove it; Esc when done |
 | `U` | Install a newer release when the footer offers one |
 | `?` | Show every key |
 | `q` | Quit (`Esc` and `Ctrl-C` also work) |

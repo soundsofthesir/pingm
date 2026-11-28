@@ -12,6 +12,9 @@ var (
 	glyphUp   = "✔"
 	glyphDown = "✘"
 
+	// glyphSelected marks the row picked for removal.
+	glyphSelected = "›"
+
 	// sparkRamp is the sparkline's height scale, lowest first.
 	sparkRamp = []rune{'▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'}
 )
@@ -64,24 +67,26 @@ var flashDownRamp = [5]lipgloss.AdaptiveColor{
 }
 
 var (
-	styleTitle   = lipgloss.NewStyle().Bold(true).Foreground(colAccent)
-	styleHint    = lipgloss.NewStyle().Foreground(colMuted)
-	styleHeader  = lipgloss.NewStyle().Bold(true).Foreground(colMuted)
-	styleRule    = lipgloss.NewStyle().Foreground(colFaint)
-	styleHost    = lipgloss.NewStyle().Foreground(colText)
-	styleUp      = lipgloss.NewStyle().Foreground(colUp)
-	styleDown    = lipgloss.NewStyle().Foreground(colDown).Bold(true)
-	styleWait    = lipgloss.NewStyle().Foreground(colMuted)
-	styleValue   = lipgloss.NewStyle().Foreground(colText)
-	styleMuted   = lipgloss.NewStyle().Foreground(colMuted)
-	styleFaint   = lipgloss.NewStyle().Foreground(colFaint)
-	styleBetter  = lipgloss.NewStyle().Foreground(colUp)
-	styleWorse   = lipgloss.NewStyle().Foreground(colDown)
-	styleWarn    = lipgloss.NewStyle().Foreground(colWarn)
-	styleFooter  = lipgloss.NewStyle().Foreground(colMuted)
-	styleKeyName = lipgloss.NewStyle().Bold(true).Foreground(colText)
-	styleSpark   = lipgloss.NewStyle().Foreground(colAccent)
-	styleLost    = lipgloss.NewStyle().Foreground(colDown)
+	styleTitle    = lipgloss.NewStyle().Bold(true).Foreground(colAccent)
+	styleHint     = lipgloss.NewStyle().Foreground(colMuted)
+	styleHeader   = lipgloss.NewStyle().Bold(true).Foreground(colMuted)
+	styleRule     = lipgloss.NewStyle().Foreground(colFaint)
+	styleHost     = lipgloss.NewStyle().Foreground(colText)
+	styleUp       = lipgloss.NewStyle().Foreground(colUp)
+	styleDown     = lipgloss.NewStyle().Foreground(colDown).Bold(true)
+	styleWait     = lipgloss.NewStyle().Foreground(colMuted)
+	styleValue    = lipgloss.NewStyle().Foreground(colText)
+	styleMuted    = lipgloss.NewStyle().Foreground(colMuted)
+	styleFaint    = lipgloss.NewStyle().Foreground(colFaint)
+	styleBetter   = lipgloss.NewStyle().Foreground(colUp)
+	styleWorse    = lipgloss.NewStyle().Foreground(colDown)
+	styleWarn     = lipgloss.NewStyle().Foreground(colWarn)
+	styleFooter   = lipgloss.NewStyle().Foreground(colMuted)
+	styleKeyName  = lipgloss.NewStyle().Bold(true).Foreground(colText)
+	styleSelected = lipgloss.NewStyle().Bold(true).Foreground(colAccent)
+	styleInput    = lipgloss.NewStyle().Foreground(colText)
+	styleSpark    = lipgloss.NewStyle().Foreground(colAccent)
+	styleLost     = lipgloss.NewStyle().Foreground(colDown)
 
 	// The help overlay sits on top of the table, so it needs a border to
 	// read as a separate surface rather than as more rows.

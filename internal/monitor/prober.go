@@ -70,6 +70,10 @@ func readPayload(b []byte) (target, number int, ok bool) {
 // Target is one host to probe, paired with the text the user typed so the
 // table can label the row with what they asked for rather than a resolved IP.
 type Target struct {
+	// ID identifies the target for its whole life, so results still find
+	// their row after other hosts have been added or removed around it.
+	// The Prober assigns it.
+	ID      int
 	Display string
 	IP      net.IP
 	Err     error // Non-nil when the name could not be resolved.
@@ -94,7 +98,6 @@ type Prober struct {
 	conn    net.PacketConn
 	raw     bool // true when using raw sockets (privileged) rather than datagram
 	id      int
-	targets []Target
 	results chan Result
 
 	// Both are adjustable while probing is under way, so they are held as
@@ -105,13 +108,16 @@ type Prober struct {
 	timeout  atomic.Int64 // nanoseconds
 	reset    chan struct{}
 
-	// mu guards inflight, which the sender, receiver and sweeper all touch.
-	// seq and counts are only ever written by the sender, but are kept under
-	// the same lock rather than reasoning about two regimes.
+	// mu guards inflight, which the sender, receiver and sweeper all touch,
+	// and the target list, which can change while probing is under way.
+	// A target's presence in counts is what makes it live: a probe that was
+	// already queued for a removed target is dropped rather than sent.
 	mu       sync.Mutex
 	seq      uint16
 	inflight map[uint16]probe
-	counts   []int // Per-target probe number, for ordering results.
+	targets  []Target
+	counts   map[int]int // Per-target probe number, keyed by target ID.
+	nextID   int
 }
 
 type probe struct {
@@ -126,6 +132,8 @@ type probe struct {
 // Linux where net.ipv4.ping_group_range permits it, and falls back to a raw
 // socket (which does require root) only if that is unavailable. On Windows the
 // datagram socket is stood in for by the system ICMP API; see echoConn.
+//
+// The targets are given IDs 0..n-1 in the order passed.
 func NewProber(targets []Target, interval, timeout time.Duration) (*Prober, error) {
 	conn, raw, err := listen(len(targets))
 	if err != nil {
@@ -140,12 +148,12 @@ func newProberOn(conn net.PacketConn, raw bool, targets []Target, interval, time
 		conn:     conn,
 		raw:      raw,
 		id:       os.Getpid() & 0xffff,
-		targets:  targets,
-		results:  make(chan Result, len(targets)*4),
+		results:  make(chan Result, len(targets)*4+64),
 		reset:    make(chan struct{}, 1),
 		inflight: make(map[uint16]probe, len(targets)*4),
-		counts:   make([]int, len(targets)),
+		counts:   make(map[int]int, len(targets)),
 	}
+	p.Add(targets...)
 	p.interval.Store(int64(interval))
 	p.timeout.Store(int64(timeout))
 	if ec, ok := conn.(*echoConn); ok {
@@ -170,6 +178,54 @@ func (p *Prober) SetInterval(d time.Duration) {
 	case p.reset <- struct{}{}:
 	default: // A reset is already pending; one is enough.
 	}
+}
+
+// Add starts probing more targets from the next round and returns them with
+// the IDs their results will carry. Any ID already set is replaced.
+func (p *Prober) Add(targets ...Target) []Target {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	added := make([]Target, len(targets))
+	for i, t := range targets {
+		t.ID = p.nextID
+		p.nextID++
+		p.targets = append(p.targets, t)
+		p.counts[t.ID] = 0
+		added[i] = t
+	}
+	return added
+}
+
+// Remove stops probing the target with this ID. Its outstanding probes are
+// forgotten rather than reported, so nothing more arrives for it except
+// results that were already queued.
+func (p *Prober) Remove(id int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, exists := p.counts[id]; !exists {
+		return
+	}
+	delete(p.counts, id)
+	kept := make([]Target, 0, len(p.targets))
+	for _, t := range p.targets {
+		if t.ID != id {
+			kept = append(kept, t)
+		}
+	}
+	p.targets = kept
+	for seq, pending := range p.inflight {
+		if pending.target == id {
+			delete(p.inflight, seq)
+		}
+	}
+}
+
+// snapshotTargets copies the current target list for one round, so the round
+// can be sent without holding the lock while it paces itself.
+func (p *Prober) snapshotTargets() []Target {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]Target(nil), p.targets...)
 }
 
 // Timeout is how long a probe may go unanswered before it counts as lost.
@@ -326,10 +382,11 @@ func (p *Prober) drain(ctx context.Context) {
 // replies arrive as a stream rather than a wall. It returns false if the run
 // was cancelled part way through.
 func (p *Prober) sendRound(ctx context.Context) bool {
-	gap := p.sendGap()
+	targets := p.snapshotTargets()
+	gap := gapFor(len(targets), p.Interval())
 	if gap <= 0 {
-		for i := range p.targets {
-			p.send(i)
+		for _, t := range targets {
+			p.send(t)
 		}
 		return ctx.Err() == nil
 	}
@@ -337,9 +394,9 @@ func (p *Prober) sendRound(ctx context.Context) bool {
 	ticker := time.NewTicker(gap)
 	defer ticker.Stop()
 
-	for i := range p.targets {
-		p.send(i)
-		if i == len(p.targets)-1 {
+	for i, t := range targets {
+		p.send(t)
+		if i == len(targets)-1 {
 			break // Nothing left to wait for.
 		}
 		select {
@@ -351,26 +408,40 @@ func (p *Prober) sendRound(ctx context.Context) bool {
 	return true
 }
 
-// sendGap is how long to wait between one probe and the next. Zero means send
-// the round in one go, which is right when there is no burst worth spreading.
+// sendGap is how long to wait between one probe and the next for the current
+// target list.
 func (p *Prober) sendGap() time.Duration {
+	p.mu.Lock()
 	n := len(p.targets)
+	p.mu.Unlock()
+	return gapFor(n, p.Interval())
+}
+
+// gapFor is the pacing gap for a round of n probes. Zero means send the round
+// in one go, which is right when there is no burst worth spreading.
+func gapFor(n int, interval time.Duration) time.Duration {
 	if n < 2 {
 		return 0
 	}
-	gap := time.Duration(float64(p.Interval()) * pacingBudget / float64(n))
+	gap := time.Duration(float64(interval) * pacingBudget / float64(n))
 	if gap > maxSendGap {
 		return maxSendGap
 	}
 	return gap
 }
 
-func (p *Prober) send(index int) {
-	target := p.targets[index]
+func (p *Prober) send(target Target) {
+	index := target.ID
 
 	p.mu.Lock()
-	p.counts[index]++
-	number := p.counts[index]
+	number, live := p.counts[index]
+	if !live {
+		// Removed since this round's list was taken.
+		p.mu.Unlock()
+		return
+	}
+	number++
+	p.counts[index] = number
 	p.mu.Unlock()
 
 	// A name that would not resolve can never answer; report it as a loss
